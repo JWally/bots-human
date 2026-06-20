@@ -1,0 +1,28 @@
+{
+  "name": "human-attack-bot",
+  "version": "0.1.0",
+  "description": "Reverse-engineering harness for HUMAN Security (formerly PerimeterX) bot detection. Parallel to bots-datadome. Recon phase only at this stage — bypass scripts will be wired up after we understand the bundle.",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "postinstall": "npx playwright install chrome",
+    "start": "node main.mjs",
+    "main": "node main.mjs",
+    "recon": "node recon.mjs",
+    "mitm": "node mitm.mjs",
+    "bypass": "node bypass.mjs",
+    "batch": "node bypass-batch.mjs",
+    "signals": "node signals.mjs",
+    "tamper": "node tamper.mjs",
+    "decrypt": "node decrypt.mjs",
+    "netdump": "node netdump.mjs",
+    "diff": "node diff.mjs"
+  },
+  "dependencies": {
+    "playwright": "^1.57.0",
+    "prompts": "^2.4.2"
+  }
+}
