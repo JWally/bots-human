@@ -1,285 +1,169 @@
-# datadome-attack-bot
+# human-attack-bot
 
-Reverse-engineering harness for [DataDome](https://datadome.co)'s
-bot-detection tag (`tags.js` v5.6.6, captured 2026-05-23). Demonstrates
-end-to-end bypass of DataDome's challenge gate through a clean
-residential-mobile network identity, with full plaintext fingerprint
-payload captured via in-flight bundle patching.
+Reverse-engineering harness for [HUMAN Security](https://www.humansecurity.com)
+(formerly **PerimeterX**) bot detection — the first-party-proxied sensor
+(`/{appId}/init.js`) as deployed on a major publisher, captured 2026-05-24.
+Recovers the collector payload end-to-end: cracks the transport cipher,
+deobfuscates the string table, and maps the hashed signal names — then
+demonstrates that a clean residential/mobile network identity passes the
+gate with an entirely honest fingerprint.
 
-Companion writeup: **[DataDome.md](DataDome.md)** — full methodology,
-every collector lambda walked, the XOR-keystream cipher reversed,
-nine documented bypass surfaces, comparison vs Castle and FingerprintJS.
+Companion writeup: **[HUMAN.md](HUMAN.md)** — full methodology, the XOR
+transport reversed via common-prefix analysis, the base91 string table,
+the hashed-signal-name dictionary, and the "clean IP beats the sensor"
+result.
 
-> **Scope.** Defensive / red-team research. Demonstrates one bot
-> producing a clean-verdict pageview on a DataDome-protected article
-> via a SOAX residential mobile proxy, and captures the in-flight
-> fingerprint payload via a small bundle patch. Does not submit
-> credentials, does not attempt to defeat post-gate authentication,
-> does not exfiltrate any user data. Intended audience: DataDome's
-> own research team, and anti-bot / fingerprinting practitioners
-> studying production hardening.
+> **Scope.** Defensive / red-team research against PerimeterX's published
+> client sensor on a public article page. Captures the sensor's own
+> telemetry payload and reverses its encoding offline. Does not submit
+> credentials, does not attempt to break into any account, does not
+> exfiltrate user data. Intended audience: HUMAN's own research team, and
+> anti-bot / fingerprinting practitioners studying production hardening.
 
 ---
 
 ## Quick start
 
 ```bash
-git clone <this-repo> datadome-attack-bot
-cd datadome-attack-bot
+git clone https://github.com/JWally/bots-human human-attack-bot
+cd human-attack-bot
 npm install                # installs playwright + downloads real Chrome channel
 npm start                  # interactive menu — pick a script with arrow keys
 ```
 
-You'll see an arrow-key menu of 9 scripts with descriptions below the
-highlighted item:
+`npm start` shows an arrow-key menu of all scripts with a description below
+the highlighted item. The natural order of work, top to bottom:
 
 ```
-datadome-attack-bot  —  DataDome reverse-engineering harness
-See README.md for context · DataDome.md for the full writeup
+human-attack-bot  —  HUMAN Security / PerimeterX reverse-engineering harness
 
-? pick a script › arrow keys to navigate · enter to run · esc/ctrl-c to quit
-❯ ★ bypass       — SOAX mobile + MITM + article fetch (THE HEADLINER)
-  ★ batch        — pull N articles in one SOAX session (multi-article POC)
-    signals      — dump every signal name DataDome collects
-    recon        — find tags.js on a DataDome-protected page
-    mitm         — Phase-1 native hooks + Phase-4 v(n,t) plaintext capture
-    tamper       — signed-envelope tamper test (t=fe → t=d)
-    decrypt      — offline XOR-keystream decoder for captured jspl blobs
-    netdump      — full network log of DataDome traffic on a target
-    diff         — diff two plaintext payload JSON files (verdict-relevant deltas)
+❯ ★ bypass          — real Chrome + SOAX mobile + verdict heuristic (THE HEADLINER)
+    recon           — find PX's first-party /{appId}/init.js sensor
+    mitm            — capture the PX collector POST(s)
+    cipher-probe    — crack the payload encoding (offline)
+    decrypt         — decode every captured collector body (offline)
+    decode-strings  — pull PX's base91 string table from the bundle
+    build-dictionary— map 8-byte hashed signal names to meanings
+    scan-strings    — keyword-scan the decoded string table
+    diff            — diff two decrypted payload JSON files
     quit
 ```
 
-Pick **bypass** for the headline demo (~2 min). After each script
-finishes you're returned to the menu.
-
-### Power-user shortcuts
-
-Every script has a direct npm-run shortcut:
-
-```bash
-npm run bypass        # same as picking bypass from the menu
-npm run batch -- 5    # fetch 5 articles in one SOAX session
-npm run signals       # dump signal inventory from bundled examples
-npm run recon
-npm run mitm
-npm run tamper
-npm run decrypt
-npm run netdump
-npm run diff
-```
+Every script also has a direct npm shortcut (`npm run recon`,
+`npm run decrypt`, …) and writes JSON to `results/` (gitignored).
 
 ### SOAX credentials
 
-The `bypass.mjs` script needs HTTP-proxy credentials. By default it
-reads `$HOME/Dev/soax.txt` (one line per pool in the format
-`POOL: curl -k -x USER:PASS@HOST:PORT -L URL`). Override with
-`SOAX_CONFIG=/path/to/creds.txt` if your file lives elsewhere.
-
-If you don't have SOAX, any HTTP proxy with a residential or mobile
-exit IP will work — just edit the proxy block in `bypass.mjs`. The
-gate is on TLS/JA4/IP, not on which proxy vendor.
+Only `bypass.mjs` needs a proxy. By default it reads `$HOME/Dev/soax.txt`
+(one line per pool, format `POOL: curl -k -x USER:PASS@HOST:PORT -L URL`);
+override with `SOAX_CONFIG=/path/to/creds.txt`. Any HTTP proxy with a
+residential or mobile exit IP works — the gate is on TLS/JA4 + IP
+reputation, not on which proxy vendor. Every other script is offline and
+runs against the captured bundle/bodies already in `results/`.
 
 ---
 
-## What each script does
+## The pipeline
 
-All scripts are standalone — run any in any order. They write JSON
-to `results/<name>.json` and most print a short summary to stdout.
+The sensor is PerimeterX's first-party model: the bundle is served from the
+**publisher's own domain** at `/{appId}/init.js` and POSTs telemetry to
+`/{appId}/xhr/...` (reverse-proxied to `collector-px{appId}.px-cloud.net`),
+so third-party blockers never see PerimeterX at all. State lives in five
+cookies (`_pxhd`, `_pxvid`, `_px2`, `pxcts`, `_pxde`).
 
 ### `bypass.mjs` ★ THE HEADLINER
 
-End-to-end gate bypass + plaintext capture in one run. Pipeline:
-
-1. Read SOAX mobile creds from `~/Dev/soax.txt` (or
-   `$SOAX_CONFIG`).
-2. Launch vanilla Playwright real Chrome (`channel: 'chrome'`,
-   headed, with `--disable-blink-features=AutomationControlled`) via
-   the SOAX HTTP proxy.
-3. Install Phase-1 native-API MITM init script — invisible
-   `Proxy`-wrapped `JSON.stringify` / `btoa`. Self-test confirms
-   `Function.prototype.toString` still returns `[native code]` for
-   the wrapped APIs.
-4. Install Phase-4 route patch on `https://js.datadome.co/tags.js`:
-   inject `try{(window.__ddTap=...).push([n,t,perf])}catch(_){}` at
-   the entry of `function v(n,t){var c,e;`. Patch adds +82 bytes; the
-   bundle still runs cleanly.
-5. Visit `https://datadome.co/blog/` (not gated; warms up the cookie
-   jar and runs humanlike mouse-wander + scroll).
-6. Click-through to a `/threat-research/` article URL.
-7. Wait for the JS tag to POST to `api-js.datadome.co/js/` (the
-   verdict).
-8. Dump the article HTML, the captured plaintext signal list,
-   the verdict JSON, screenshot, full network log.
-
-Result on a clean mobile identity: HTTP 200 on the article, ~200
-plaintext signals captured. ~2 min.
-
-### `bypass-batch.mjs` ★ MULTI-ARTICLE POC
-
-Same harness as `bypass.mjs`, but loops over N articles harvested
-from `/blog/` in one persistent Chrome session through a single SOAX
-mobile pool. One init, one cookie warm-up on `/blog/`, then sequential
-visits to N article URLs with humanlike behavior + a 2-4 second pause
-between each.
-
-Per-article output to `results/batch/`:
-
-- `<slug>.html` — the article body fetched directly from datadome.co
-- `<slug>.plaintext.json` — the per-article plaintext signal payload
-- `summary.json` — verdict for every article in the run (status, size,
-  H1, signal count, blocked/solved flag)
-
-Usage: `node bypass-batch.mjs [N]`  (default 5, max 15). ~30-60 sec per
-article including humanlike behavior. ~3-6 min total for the default
-N=5.
-
-### `signals.mjs`
-
-Builds a clean inventory from one or more plaintext-payload JSON files.
-For each unique signal name DataDome's `v(n,t)` chokepoint sees, the
-inventory records:
-
-- the value type (number / string / boolean)
-- a sample value (first observed; truncated if long)
-- how many distinct values were observed across captures
-- the bucket (network-timing / behavioral / keyboard-dynamics /
-  ai-agent-detector / canvas-css-fingerprint / etc.)
-
-Usage:
-- `node signals.mjs` — with no args, uses the bundled `examples/*.json`
-  reference captures (hard-blocked + clean-mobile). Useful as the
-  "what does DD collect" reference doc.
-- `node signals.mjs results/bypass-plaintext.json` — inventory from
-  one fresh capture.
-- `node signals.mjs file1.json file2.json ...` — merged inventory
-  across multiple captures (catches signals that only fire under
-  certain conditions).
-
-Output: `results/signals-inventory.json` + a stdout dump bucketed by
-role. Bundled inventory at `examples/signals-inventory.json` covers
-~203 unique signal names from two reference sessions.
+Vanilla **real Chrome** (`channel: 'chrome'`, only
+`--disable-blink-features=AutomationControlled`) through a SOAX
+residential/mobile proxy, warm-up with humanlike mouse/scroll, then load a
+PX-protected Bloomberg article. Captures every collector POST and reports a
+verdict heuristic (HTTP status, `<title>`, presence of `#px-captcha`, body
+length, PX cookie set). On a clean mobile identity: **HTTP 200, full
+article, no captcha** — with a fully honest fingerprint payload. No sensor
+tampering. The takeaway is that the expensive, obfuscated client sensor is
+mostly evidence collection; the decisive gate is **IP reputation + a real
+browser stack**.
 
 ### `recon.mjs`
 
-Loads a target URL with Playwright, logs every JS response, flags
-chunks matching `js.datadome.co/tags.js` or
-`captcha-delivery.com/c.js`. Reports the bundle version (it's in the
-banner comment — `/** DataDome ... version X.Y.Z */`). Run first to
-confirm which version is deployed. ~1 min.
+Loads a target with real Chrome, logs every JS response, flags the
+first-party `/{appId}/init.js` sensor, records the `appId`, dumps the bundle
+to `results/bundle-{appId}-init.js`, and probes PX globals (`_pxAppId`,
+`ClientUuid`) + cookies after load. Run first.
 
 ### `mitm.mjs`
 
-Phase-1 native-API hooks + Phase-4 bundle patch in a generic form
-(no SOAX, runs against any target). Captures the plaintext payload
-in `results/mitm.json`. Use this for a quick local capture; use
-`bypass.mjs` when you need to bypass the gate too. ~1 min.
+Captures the collector POST(s) — every `payload=` body to the first-party
+`/{appId}/xhr` proxy or `collector-px*.px-cloud.net` — and saves them raw to
+`results/mitm-bodies/` + `results/mitm.json`. Optional in-flight bundle tap
+for cleartext.
 
-### `tamper.mjs`
+### `cipher-probe.mjs`
 
-Extracts the challenge envelope from a DataDome 403 response (the
-`dd` object with `t / s / e` fields), then makes two requests to
-`geo.captcha-delivery.com/captcha/`:
-
-1. Original — `t=fe` (force end-user CAPTCHA).
-2. Tampered — `t=d` (request the invisible device check instead).
-
-Compares responses. The `e` field is a 256-bit HMAC over the
-envelope; both requests return identical "You have been blocked"
-pages (or both succeed if you're not flagged). Confirms the signed
-envelope catches client-side tampering. ~30 sec.
+Reads `results/mitm.json`, base64-decodes each body, and runs
+common-prefix + frequency + XOR-key trials. The 13 captured bodies share a
+constant 7-byte ciphertext prefix; XOR-ing it yields `[{"t":"` — valid JSON.
+Recovers the transport key (**single-byte XOR `0x32`**, no keying material,
+no MAC) without ever patching the bundle.
 
 ### `decrypt.mjs`
 
-Offline decoder for the `jspl` field of a captured POST body. Given
-`(ddjskey, jspl_base64url, request_timestamp_ms)`:
+XOR-`0x32` + base64-decode every captured collector body into the PX
+telemetry array, written to `results/decrypted/*.json`:
 
-1. Reverses the custom base64-like alphabet
-   (`H1DAxCvrj7IaPRL8GSJZKX3f62e9d0VTilFEOWgUB=/t+QmMwuskNnhpb4oyq5Yzc`).
-2. Runs the Marsaglia-xorshift PRNG with seed
-   `Date.now() >> 3 ^ 11027890091` and second seed from
-   `hash(ddjskey)`.
-3. XORs the keystream out.
-4. Prints the TLV plaintext byte-for-byte.
+```json
+[{ "t": "<8-byte-base64 hash>", "d": { "<8-byte-base64 hash>": <value>, ... } }]
+```
 
-Use this to verify the cipher reversal against a known capture from
-`bypass.mjs`. ~5 sec.
+`t` and the `d` keys are 8-byte (64-bit) **hashed** signal names; values are
+clear (numbers, strings, booleans, nested objects). Pure offline.
 
-### `netdump.mjs`
+### `decode-strings.mjs`
 
-Full request/response log of every URL touching `datadome.co`,
-`captcha-delivery.com`, `datado.me`, `api-js.datadome.co`. Body
-capture for `*.datadome.co` only. Saves to `results/netdump.json`
-and `results/netdump-bodies/`. Use to inspect the cookie-rotation
-JSON response and any inline `dd` object on a 403 challenge page.
-~1 min.
+The bundle ships an obfuscated string array (`ke=[...]`) and a **base91**
+decoder (`kb`) with a permuted 91-char alphabet hardcoded at the top; a lazy
+`kc(t)` returns `kb(ke[t])` on first read. This script extracts the alphabet
++ array and decodes every entry to `results/strings.json` (idx → plaintext),
+recovering the API/property/endpoint strings the sensor hides.
 
-### `diff.mjs`
+### `build-dictionary.mjs`
 
-Given two plaintext-payload JSON files (the kind `bypass.mjs` and
-`mitm.mjs` produce), prints:
+The 8-byte hashed signal names are string literals at the call site where
+each value is computed (`obj["InJQeGcTUEI="] = navigator.platform`, …). This
+greps the bundle for each hash, reads a context window, and resolves what
+each signal measures to `results/dictionary.json` (~75 of 189 recovered
+structurally).
 
-- Total signal counts in each
-- Signals present in only one
-- Signals with different values (sorted alphabetically)
-- A short "verdict-relevant deltas" section identifying the
-  network-timing (`nt_*`), language (`lgs / wwl`), and behavioral
-  (`nid / crt`) deltas
+### `scan-strings.mjs` / `diff.mjs`
 
-Use to compare a hard-blocked run vs a clean-verdict run, or to
-A/B different network identities. ~5 sec.
+`scan-strings` keyword-scans `results/strings.json` for notable tokens.
+`diff` compares two decrypted payload JSON files (counts, only-in-one,
+changed values, verdict-relevant deltas) — e.g. a home-IP run vs a
+SOAX-mobile run.
 
 ---
 
-## File layout
-
-```
-datadome-attack-bot/
-├── README.md            ← this file
-├── DataDome.md          ← the full reverse-engineering writeup
-├── package.json
-├── main.mjs             ← arrow-key menu launcher
-├── recon.mjs
-├── mitm.mjs
-├── bypass.mjs           ★ the headliner
-├── tamper.mjs
-├── decrypt.mjs
-├── netdump.mjs
-├── diff.mjs
-├── examples/            ← reference captures for diff / decrypt
-│   ├── hard-blocked-plaintext.json   (202 signals, server verdict: hard_block)
-│   └── clean-tmobile-plaintext.json  (201 signals, server verdict: t='d')
-└── results/             ← created by scripts (.gitignored)
-    ├── bypass.json
-    ├── mitm.json
-    ├── ...
-```
-
 ## Known limitations
 
-- **DataDome rolls `tags.js` periodically.** The v(n,t) chokepoint
-  regex in `mitm.mjs` / `bypass.mjs` matches the v5.6.6 / v5.6.7
-  bundle layout. If they refactor, the patch fails closed (script
-  reports "v(n,t) header not found" and continues without the tap —
-  the rest still works). Re-run `recon.mjs` after a hash drift to
-  find the new entry point.
-- **The bypass uses a residential mobile IP.** If you run from a
-  data-center or already-flagged IP, you'll get `t='fe'` (interactive
-  CAPTCHA) or `hard_block`. The harness reports the verdict but
-  doesn't solve the CAPTCHA — that's a different problem.
-- **Real Chrome required.** `channel: 'chrome'` not Chromium. The
-  download happens automatically via `postinstall`. If it fails,
-  run `npx playwright install chrome` manually.
+- **PX rotates the sensor bundle.** The `appId` and bundle hash drift;
+  re-run `recon.mjs` to grab the current bundle before the offline tools.
+- **An inner blob layer remains.** XOR-`0x32` cleanly recovers the
+  structural JSON and short scalar fields; some long fingerprint blobs go
+  garbled after a prefix, implying a second inner encoding layered on those
+  specific values. The harness is "good enough to index signal names," not a
+  full plaintext recovery of every field.
+- **The bypass uses a residential/mobile IP.** From a data-center or
+  already-flagged IP you'll get an interactive `#px-captcha` or block. The
+  harness reports the verdict; it does not solve the press-and-hold captcha
+  — that's a different problem.
+- **Real Chrome required.** `channel: 'chrome'`, not Chromium (downloaded
+  via `postinstall`; otherwise `npx playwright install chrome`).
 - **No credential submission.** The bypass demos navigation only.
-  Any post-gate auth would be a different threat model.
 
 ## Companion documents
 
-- **[DataDome.md](DataDome.md)** — the methodology + findings
-  writeup (the v5.6.6 reverse, every collector, the cipher, the
-  Worker realm, the signed envelope, nine bypass surfaces).
-- **[bots-x-castle](https://github.com/JWally/bots-x-castle)** — the
-  same methodology applied to Castle (different vendor, same
-  chokepoint lessons).
-- `~/Dev/reading-list/datadome/` — 486 archived DataDome blog
-  posts (via Wayback) for further reading.
+- **[HUMAN.md](HUMAN.md)** — the methodology + findings writeup.
+- **[bots-x-castle](https://github.com/JWally/bots-x-castle)** and
+  **[bots-datadome](https://github.com/JWally/bots-datadome)** — the same
+  methodology applied to Castle and DataDome (different vendors, different
+  ciphers, same chokepoint lessons).

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Interactive launcher for datadome-attack-bot.
+// Interactive launcher for human-attack-bot.
 // Arrow-key menu over all scripts; descriptions render below the list.
 // Children inherit stdio so live output streams through.
 
@@ -13,99 +13,88 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPTS = [
   {
     file: "bypass.mjs",
-    title: "★ bypass       — SOAX mobile + MITM + article fetch (THE HEADLINER)",
+    title: "★ bypass          — real Chrome + SOAX mobile + verdict heuristic (THE HEADLINER)",
     desc:
       "Reads SOAX mobile creds from ~/Dev/soax.txt (or $SOAX_CONFIG). " +
-      "Launches real Chrome via SOAX proxy, installs Phase-1 native-API " +
-      "hooks + Phase-4 v(n,t) bundle patch, warms reputation on /blog/ " +
-      "with humanlike behavior, click-throughs to a /threat-research/ " +
-      "article. Saves the article HTML + the captured plaintext payload " +
-      "+ the verdict JSON to results/. Expected on clean mobile IP: " +
-      "HTTP 200 invisible-pass, ~200 plaintext signals. ~2 min.",
-  },
-  {
-    file: "bypass-batch.mjs",
-    title: "★ batch        — pull N articles in one SOAX session (multi-article POC)",
-    desc:
-      "Same harness as bypass.mjs but loops over N articles harvested from " +
-      "/blog/. One persistent Chrome context, one SOAX session, humanlike " +
-      "behavior + pause between articles. Defaults N=5, max 15. Writes " +
-      "per-article HTML + plaintext + summary.json to results/batch/. " +
-      "~3-6 min depending on N.",
-  },
-  {
-    file: "signals.mjs",
-    title: "  signals      — dump every signal name DataDome collects",
-    desc:
-      "Builds a clean inventory from one or more plaintext capture files: " +
-      "every signal name DD's v(n,t) chokepoint sees, with one example " +
-      "value each, bucketed by role (network-timing, behavioral, " +
-      "keyboard-dynamics, ai-agent-detector, etc.). With no args, uses the " +
-      "bundled examples/ payloads — useful as the 'what does DD collect' " +
-      "reference. ~3 sec.",
+      "Launches vanilla real Chrome (channel: 'chrome') via the SOAX proxy, " +
+      "warms reputation with humanlike mouse/scroll, then loads a PX-protected " +
+      "Bloomberg article. Captures every PX collector POST and reports the " +
+      "verdict heuristic: HTTP status, page title, presence of #px-captcha, " +
+      "body length, PX cookie set. Expected on a clean mobile IP: HTTP 200, " +
+      "full article, no captcha. ~2 min.",
   },
   {
     file: "recon.mjs",
-    title: "  recon        — find tags.js on a DataDome-protected page",
+    title: "  recon           — find PX's first-party /{appId}/init.js sensor",
     desc:
-      "Loads a target URL, logs every JS response, flags chunks " +
-      "matching js.datadome.co/tags.js or captcha-delivery.com/c.js. " +
-      "Reports the bundle version from the banner comment. Run first " +
-      "to confirm which version is deployed and verify the v(n,t) " +
-      "chokepoint regex still matches. ~1 min.",
+      "Loads a target URL with real Chrome, logs every JS response, flags the " +
+      "first-party-proxied /{appId}/init.js sensor, records the appId, dumps " +
+      "the bundle to results/, and probes for PX globals (_pxAppId, ClientUuid) " +
+      "+ cookies (_pxhd / _pxvid / _px2 / pxcts) after load. Run first to " +
+      "confirm the deployment and grab the bundle. ~1 min.",
   },
   {
     file: "mitm.mjs",
-    title: "  mitm         — Phase-1 native hooks + Phase-4 v(n,t) plaintext capture",
+    title: "  mitm            — capture the PX collector POST(s)",
     desc:
-      "Generic capture run (no SOAX). Installs the same MITM as bypass, " +
-      "visits a target URL, dumps the in-flight plaintext signal list. " +
-      "Use for a quick local capture or when you already have a clean " +
-      "IP. Output: results/mitm.json with the plaintext payload + " +
-      "self-test results + patch metadata. ~1 min.",
+      "Launches real Chrome, performs ~25s of humanlike activity, and captures " +
+      "every POST to the first-party /{appId}/xhr proxy or collector-PX*." +
+      "px-cloud.net. Saves the raw payload= bodies to results/mitm-bodies/ " +
+      "and results/mitm.json. Optional in-flight bundle tap for cleartext. " +
+      "~1 min.",
   },
   {
-    file: "tamper.mjs",
-    title: "  tamper       — signed-envelope tamper test (t=fe → t=d)",
+    file: "cipher-probe.mjs",
+    title: "  cipher-probe    — crack the payload encoding (offline)",
     desc:
-      "Extracts the challenge envelope (the inline dd object with " +
-      "t / s / e fields) from a DataDome 403 response, then issues two " +
-      "requests to geo.captcha-delivery.com/captcha/: original (t=fe) " +
-      "and tampered (t=d). Compares responses byte-by-byte. The e field " +
-      "is a 256-bit HMAC over the envelope — tamper is caught, both " +
-      "return identical 'You have been blocked'. Confirms the signed " +
-      "verdict architecture. ~30 sec.",
+      "Reads results/mitm.json, base64-decodes each captured payload= body, " +
+      "and runs common-prefix + frequency + XOR-key trials. Recovers the " +
+      "single-byte XOR transport key (0x32) from the constant ciphertext " +
+      "prefix — no bundle patch, no keying material, no MAC. ~3 sec.",
   },
   {
     file: "decrypt.mjs",
-    title: "  decrypt      — offline XOR-keystream decoder for captured jspl",
+    title: "  decrypt         — decode every captured collector body (offline)",
     desc:
-      "Given (ddjskey, jspl_base64url, request_timestamp_ms): reverses " +
-      "the custom base64-like alphabet, runs the Marsaglia-xorshift PRNG " +
-      "with the right seed, XORs the keystream, and prints the TLV " +
-      "plaintext bytes. Use to verify the cipher reversal against a " +
-      "known bypass capture. Pure offline — no browser. ~5 sec.",
+      "XOR-0x32 + base64-decode each captured collector POST into the PX " +
+      "telemetry array: [{\"t\":\"<hash>\",\"d\":{\"<hash>\": value, ...}}]. " +
+      "Writes results/decrypted/*.json. The t and d keys are 8-byte hashed " +
+      "signal names; values are clear. Pure offline. ~5 sec.",
   },
   {
-    file: "netdump.mjs",
-    title: "  netdump      — full network log of DataDome traffic on a target",
+    file: "decode-strings.mjs",
+    title: "  decode-strings  — pull PX's base91 string table from the bundle",
     desc:
-      "Captures every request/response touching datadome.co, " +
-      "captcha-delivery.com, datado.me, api-js.datadome.co. Includes " +
-      "bodies for *.datadome.co. Saves to results/netdump.json + " +
-      "results/netdump-bodies/. Use to inspect the cookie-rotation JSON " +
-      "response and the inline dd envelope on 403 challenge pages. ~1 min.",
+      "Extracts the permuted 91-char alphabet + obfuscated string array (ke[]) " +
+      "from init.js and runs the lazy base91 decoder (kb) over every entry. " +
+      "Dumps results/strings.json (idx → plaintext). This deobfuscates the " +
+      "API/property/endpoint strings the sensor hides. ~2 sec.",
+  },
+  {
+    file: "build-dictionary.mjs",
+    title: "  build-dictionary— map 8-byte hashed signal names to meanings",
+    desc:
+      "For each hashed signal name (e.g. \"AW1zJ0cBdhc=\"), grep the bundle for " +
+      "its string-literal call site and read a window of context (the property " +
+      "or kc()-resolved expression assigned to it) to recover what each signal " +
+      "measures. Writes results/dictionary.json. ~5 sec.",
+  },
+  {
+    file: "scan-strings.mjs",
+    title: "  scan-strings    — keyword-scan the decoded string table",
+    desc:
+      "Scans results/strings.json for notable tokens (navigator/webdriver/" +
+      "automation/canvas/webgl/etc.) to surface the interesting deobfuscated " +
+      "strings quickly. Run after decode-strings. ~1 sec.",
   },
   {
     file: "diff.mjs",
-    title: "  diff         — diff two plaintext payload JSON files",
+    title: "  diff            — diff two decrypted payload JSON files",
     desc:
-      "Pass two plaintext-payload JSON files (the kind bypass / mitm " +
-      "produce). Prints total counts, signals present in only one, " +
-      "signals with different values, and a 'verdict-relevant deltas' " +
-      "section calling out nt_* (network timing), lgs/wwl (language), " +
-      "and nid/crt (behavioral) deltas. Use to compare hard-block vs " +
-      "clean-verdict runs, or A/B network identities. ~5 sec.",
+      "Pass two decrypted payload JSON files. Prints total signal counts, " +
+      "signals present in only one, signals with different values, and a " +
+      "verdict-relevant deltas section. Use to compare a home-IP run vs a " +
+      "SOAX-mobile run, or A/B two network identities. ~5 sec.",
   },
 ];
 
@@ -113,8 +102,8 @@ const QUIT = { title: "  quit", value: "__quit__" };
 
 function renderTitle() {
   return [
-    "datadome-attack-bot  —  DataDome reverse-engineering harness",
-    "See README.md for context · DataDome.md for the full writeup",
+    "human-attack-bot  —  HUMAN Security / PerimeterX reverse-engineering harness",
+    "See README.md for context · HUMAN.md for the full writeup",
     "",
   ].join("\n");
 }

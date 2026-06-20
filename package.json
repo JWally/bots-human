@@ -1,7 +1,7 @@
 {
   "name": "human-attack-bot",
   "version": "0.1.0",
-  "description": "Reverse-engineering harness for HUMAN Security (formerly PerimeterX) bot detection. Parallel to bots-datadome. Recon phase only at this stage — bypass scripts will be wired up after we understand the bundle.",
+  "description": "Reverse-engineering harness for HUMAN Security (formerly PerimeterX) bot detection: recon the first-party sensor, capture the collector payload, crack the XOR transport + base91 string table, and map the hashed signal names.",
   "type": "module",
   "private": true,
   "engines": {
@@ -14,11 +14,11 @@
     "recon": "node recon.mjs",
     "mitm": "node mitm.mjs",
     "bypass": "node bypass.mjs",
-    "batch": "node bypass-batch.mjs",
-    "signals": "node signals.mjs",
-    "tamper": "node tamper.mjs",
+    "cipher-probe": "node cipher-probe.mjs",
     "decrypt": "node decrypt.mjs",
-    "netdump": "node netdump.mjs",
+    "decode-strings": "node decode-strings.mjs",
+    "build-dictionary": "node build-dictionary.mjs",
+    "scan-strings": "node scan-strings.mjs",
     "diff": "node diff.mjs"
   },
   "dependencies": {
